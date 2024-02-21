@@ -1,88 +1,102 @@
 import requests
-import smtplib
-import datetime
 from bs4 import BeautifulSoup
+from twilio.rest import Client
+import sqlite3
+import datetime
+import time
 
-# Etherscan URL
-url = "https://etherscan.io/gastracker"
+def test_connection(url):
+    try:
+        response = requests.get(url)
+        if response.status_code == 200:
+            print("Connection to", url, "is successful.")
+            return True
+        else:
+            print("Connection to", url, "failed. Status code:", response.status_code)
+            return False
+    except requests.exceptions.RequestException as e:
+        print("An error occurred:", str(e))
+        return False
 
-# SMTP server and port
-smtp_server = "smtp.gmail.com"
-smtp_port = 587
+url = "https://etherscan.io"
+if test_connection(url):
+    # اجرای کد دلخواه در صورت برقراری اتصال
+    print("Running your code here...")
+else:
+    print("Failed to establish connection to", url)
 
-# Twilio account details
-account_sid = "your_account_sid"
-auth_token = "your_auth_token"
-from_number = "your_from_number"
-to_number = "your_to_number"
 
-# Maximum SMS per day
-max_sms_per_day = 5
+# تنظیمات Twilio
+account_sid = 'your_account_sid'
+auth_token = 'your_auth_token'
+twilio_from_number = 'your_from_number'
+twilio_to_number = 'your_to_number'
 
-# Days to not send SMS
-no_sms_days = ["monday", "tuesday"]
+client = Client(account_sid, auth_token)
 
+# تابع برای خواندن مقدار GWEI از وبسایت
 def get_gwei():
+    url = 'https://etherscan.io/gastracker'
     response = requests.get(url)
-    soup = BeautifulSoup(response.content, "html.parser")
-    gwei_element = soup.find("span", class_="gwei-value")
-    return int(gwei_element.text)
-
-def send_email(gwei, now):
-    sender_email = "youremail@gmail.com"
-    sender_password = "yourpassword"
-    receiver_email = "youremail@gmail.com"
-    subject = "Gwei is below 15!"
-    message = f"""
-Gwei is below 15 at {now}.
-
-Check it out: {url}
-"""
-    with smtplib.SMTP(smtp_server, smtp_port) as smtp:
-        smtp.starttls()
-        smtp.login(sender_email, sender_password)
-        smtp.sendmail(sender_email, receiver_email, message.encode("utf-8"))
-
-def send_sms(gwei, now):
-    client = twilio.rest.Client(account_sid, auth_token)
-    message = client.messages.create(
-        body=f"Gwei is below 15 at {now}. Check it out: {url}",
-        from_=from_number,
-        to=to_number,
-    )
-
-def main():
-    now = datetime.datetime.now()
-    gwei = get_gwei()
-
-    # Check if today is a no-SMS day
-    if now.strftime("%A").lower() in no_sms_days:
-        return
-
-    # Check if the number of SMS sent today is less than the limit
-    connection = sqlite3.connect("sms.db")
-    cursor = connection.cursor()
-    cursor.execute("""
-        SELECT count
-        FROM sms_log
-        WHERE date = ?
-    """, (now.date(),))
-    row = cursor.fetchone()
-    count = row[0] if row else 0
-    connection.close()
-
-    if count < max_sms_per_day:
-        send_sms(gwei, now)
-        # Update count in database
-        cursor.execute("""
-            UPDATE sms_log
-            SET count = ?
-            WHERE date = ?
-        """, (count + 1, now.date()))
-        connection.commit()
-        connection.close()
+    soup = BeautifulSoup(response.text, 'html.parser')
+    gwei_span = soup.find('span', id='spanAvgPrice')
+    if gwei_span:
+        return int(gwei_span.text.strip())
     else:
-        print(f"Not sending SMS, daily limit of {max_sms_per_day} reached.")
+        return None
 
-if __name__ == "__main__":
-    main()
+# تابع برای ارسال پیامک
+def send_sms(message):
+    client.messages.create(body=message, from_=twilio_from_number, to=twilio_to_number)
+
+# تابع برای بررسی و ارسال پیامک
+def check_and_send_sms(cursor, conn):
+    gwei = get_gwei()
+    if gwei is not None:
+        date = datetime.datetime.now().date()
+        day_of_week = datetime.datetime.now().strftime('%A')
+        
+        # بررسی روزهایی که نباید پیامک ارسال شود
+        if day_of_week not in no_sms_days:
+            # بررسی مقدار GWEI
+            if gwei < 50:
+                # بررسی تعداد پیامک‌های ارسال شده امروز
+                cursor.execute("SELECT COUNT(*) FROM sms_log WHERE date = ? AND sent = 1", (date,))
+                sms_count = cursor.fetchone()[0]
+                if sms_count < 2:  # حداکثر تعداد پیامک‌های ارسالی در روز
+                    send_sms(f"GWEI is {gwei}")
+                    cursor.execute("INSERT INTO sms_log (date, gwei, sent) VALUES (?, ?, 1)", (date, gwei))
+                    conn.commit()
+                    print("SMS sent successfully!")
+                else:
+                    print("Maximum SMS limit reached for today!")
+            else:
+                print("GWEI is above 50, no action needed.")
+        else:
+            print("No SMS will be sent today.")
+    else:
+        print("Failed to fetch GWEI value from the website.")
+
+# اتصال به پایگاه داده SQLite
+conn = sqlite3.connect('sms_data.db')
+cursor = conn.cursor()
+
+# ایجاد جدول اگر وجود نداشته باشد
+cursor.execute('''CREATE TABLE IF NOT EXISTS sms_log
+                  (date DATE, gwei INTEGER, sent BOOLEAN)''')
+
+# تنظیم روزهایی که پیامک ارسال نمی‌شود
+no_sms_days = ['Monday', 'Tuesday']  # روزهایی که می‌خواهید پیامک ارسال نشود
+
+try:
+    # حلقه اجرا برنامه همواره
+    while True:
+        check_and_send_sms(cursor, conn)
+        time.sleep(60)  # انتظار یک دقیقه قبل از اجرای مجدد برنامه
+except KeyboardInterrupt:
+    print("Program stopped by the user.")
+except Exception as e:
+    print(f"An error occurred: {e}")
+finally:
+    # بستن اتصال به پایگاه داده
+    conn.close()
