@@ -1,0 +1,88 @@
+import requests
+import smtplib
+import datetime
+from bs4 import BeautifulSoup
+
+# Etherscan URL
+url = "https://etherscan.io/gastracker"
+
+# SMTP server and port
+smtp_server = "smtp.gmail.com"
+smtp_port = 587
+
+# Twilio account details
+account_sid = "your_account_sid"
+auth_token = "your_auth_token"
+from_number = "your_from_number"
+to_number = "your_to_number"
+
+# Maximum SMS per day
+max_sms_per_day = 5
+
+# Days to not send SMS
+no_sms_days = ["monday", "tuesday"]
+
+def get_gwei():
+    response = requests.get(url)
+    soup = BeautifulSoup(response.content, "html.parser")
+    gwei_element = soup.find("span", class_="gwei-value")
+    return int(gwei_element.text)
+
+def send_email(gwei, now):
+    sender_email = "youremail@gmail.com"
+    sender_password = "yourpassword"
+    receiver_email = "youremail@gmail.com"
+    subject = "Gwei is below 15!"
+    message = f"""
+Gwei is below 15 at {now}.
+
+Check it out: {url}
+"""
+    with smtplib.SMTP(smtp_server, smtp_port) as smtp:
+        smtp.starttls()
+        smtp.login(sender_email, sender_password)
+        smtp.sendmail(sender_email, receiver_email, message.encode("utf-8"))
+
+def send_sms(gwei, now):
+    client = twilio.rest.Client(account_sid, auth_token)
+    message = client.messages.create(
+        body=f"Gwei is below 15 at {now}. Check it out: {url}",
+        from_=from_number,
+        to=to_number,
+    )
+
+def main():
+    now = datetime.datetime.now()
+    gwei = get_gwei()
+
+    # Check if today is a no-SMS day
+    if now.strftime("%A").lower() in no_sms_days:
+        return
+
+    # Check if the number of SMS sent today is less than the limit
+    connection = sqlite3.connect("sms.db")
+    cursor = connection.cursor()
+    cursor.execute("""
+        SELECT count
+        FROM sms_log
+        WHERE date = ?
+    """, (now.date(),))
+    row = cursor.fetchone()
+    count = row[0] if row else 0
+    connection.close()
+
+    if count < max_sms_per_day:
+        send_sms(gwei, now)
+        # Update count in database
+        cursor.execute("""
+            UPDATE sms_log
+            SET count = ?
+            WHERE date = ?
+        """, (count + 1, now.date()))
+        connection.commit()
+        connection.close()
+    else:
+        print(f"Not sending SMS, daily limit of {max_sms_per_day} reached.")
+
+if __name__ == "__main__":
+    main()
